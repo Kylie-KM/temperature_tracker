@@ -1,6 +1,6 @@
-use chrono::{TimeZone, Utc};
+use chrono::{TimeZone, Utc, DateTime, Timelike};
 use eframe::egui;
-use egui_plot::{Line, Plot, PlotPoints, PlotUi};
+use egui_plot::{Line, Plot, PlotPoints, PlotUi, GridMark};
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -358,7 +358,7 @@ impl WeatherApp {
         daily_records
     }
 
-    fn render_plot(&self, ui: &mut egui::Ui, datasets: Vec<(Vec<TemperatureRecord>, egui::Color32)>) {
+    fn render_plot(&self, ui: &mut egui::Ui, datasets: Vec<(Vec<TemperatureRecord>, egui::Color32)>, chunk_size: u32) {
         if datasets.iter().all(|(records, _)| records.is_empty()) {
             ui.label("No data available within this timeframe. Update location or adjust ranges.");
             return;
@@ -407,25 +407,55 @@ impl WeatherApp {
                     .include_y(max_temp + 5.0)
                     .include_x(min_time as f64)
                     .include_x(max_time as f64)
+					.set_margin_fraction(egui::Vec2::new(0.0, 0.0)) //removes default margins from graph. no x-axis margin necessary, y-axis margin manually set elsewhere
                     .x_axis_formatter(move |tick, _, _| {
                         // Apply location's UTC offset directly instead of system's local timezone
+						// since this program can be used for non-local locations, we cannot just rely on system time
                         let target_local_time = Utc.timestamp_opt(tick.value as i64 + current_offset, 0).unwrap();
-                        target_local_time.format("%m/%d %H:%M").to_string()
+                        target_local_time.format("%m-%d %H:%M").to_string()
                     })
                     .y_axis_formatter(|tick, _, _| {
-                        // Fixed: Formats ticks as whole numbers to eliminate decimal clutter
-                        format!("{:.0}°C", tick.value)
+                        format!("{:.0}°C ", tick.value)
                     })
-                    .label_formatter(|_, _| String::new())
-                    .show(ui, |plot_ui: &mut PlotUi| {
+                    .label_formatter(|_, _| String::new());
+					//24 and 72 hour overviews pass a >0 chunk size, which is used to determine grid lines
+					let plot_response = if chunk_size > 0 {
+							let end_reference = max_time as u32;
+							plot_response.x_grid_spacer(move |grid_input| {
+								let mut marks = Vec::new();
+								let standard_hour = 3600.0;
+								let chunk_seconds = (chunk_size * 3600) as f64;
+
+								let start_timestamp = (grid_input.bounds.0 / standard_hour).ceil() as u32 * 3600;
+								let end_timestamp = grid_input.bounds.1 as u32;
+
+								for timestamp in (start_timestamp..=end_timestamp).step_by(3600) {
+									// Calculate how many hours away this tick is from the latest data point
+									let distance_seconds = end_reference - timestamp;
+									let distance_hours = distance_seconds / 3600;
+
+									// If the hourly distance is perfectly divisible by the chunk size, it's a major line
+									let is_major_chunk = distance_hours % chunk_size == 0 && distance_seconds > 0;
+
+									marks.push(GridMark {
+										value: timestamp as f64,
+										step_size: if is_major_chunk { chunk_seconds } else { standard_hour },
+									});
+								}
+								marks
+							})
+					} else { //custom graphs pass chunk size as 0, therefore rely on egui default grid lines
+						plot_response
+					};
+
+					let plot_hover = plot_response.show(ui, |plot_ui: &mut PlotUi| {
                         for line in lines {
                             plot_ui.line(line);
                         }
                         plot_ui.pointer_coordinate()
                     });
-
-                if plot_response.response.hovered() {
-                    if let Some(plot_pos) = plot_response.inner {
+                if plot_hover.response.hovered() {
+                    if let Some(plot_pos) = plot_hover.inner {
                         
                         let mut closest_x_diff = f64::MAX;
                         let mut target_timestamp = 0;
@@ -534,8 +564,9 @@ impl eframe::App for WeatherApp {
                 let mut current_tab = ctx.memory(|mem| mem.data.get_temp::<usize>(egui::Id::new("current_tab")).unwrap_or(0));
 
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut current_tab, 0, "72-Hour Overview");
-                    ui.selectable_value(&mut current_tab, 1, "Custom Analytics & Configuration");
+                    ui.selectable_value(&mut current_tab, 0, "24-Hour Overview");
+					ui.selectable_value(&mut current_tab, 1, "72-Hour Overview");
+                    ui.selectable_value(&mut current_tab, 2, "Custom Analytics & Configuration");
                 });
                 
                 ctx.memory_mut(|mem| mem.data.insert_temp(egui::Id::new("current_tab"), current_tab));
@@ -547,12 +578,23 @@ impl eframe::App for WeatherApp {
                     if self.current_location.is_empty() {
                         ui.colored_label(egui::Color32::LIGHT_RED, "⚠️ Location not set. Please check \"Custom Analytics & Configuration\" tab.");
                     } else {
-                        ui.label(format!("Showing past 72 hours for: {}", self.current_location));
+                        ui.label(format!("Showing past 24 hours for: {}", self.current_location));
                         let end_time = Utc::now().timestamp();
-                        let start_time = end_time - (72 * 60 * 60);
+                        let start_time = end_time - (24 * 60 * 60); //time is in seconds, so *60 = minutes, *60 = hours, *24 = 24 hours
                         
                         let records = self.db.get_records(&self.current_location, start_time, end_time);
-                        self.render_plot(ui, vec![(records, egui::Color32::RED)]);
+                        self.render_plot(ui, vec![(records, egui::Color32::RED)], 6);
+                    }
+				} else if current_tab == 1 {
+                    if self.current_location.is_empty() {
+                        ui.colored_label(egui::Color32::LIGHT_RED, "⚠️ Location not set. Please check \"Custom Analytics & Configuration\" tab.");
+                    } else {
+                        ui.label(format!("Showing past 72 hours for: {}", self.current_location));
+                        let end_time = Utc::now().timestamp();
+                        let start_time = end_time - (72 * 60 * 60); //see above comment in previous if statement
+                        
+                        let records = self.db.get_records(&self.current_location, start_time, end_time);
+                        self.render_plot(ui, vec![(records, egui::Color32::RED)], 24);
                     }
                 } else {
                     ui.label("Configuration");
@@ -659,7 +701,7 @@ impl eframe::App for WeatherApp {
                             },
                         };
 
-                        self.render_plot(ui, display_datasets);
+                        self.render_plot(ui, display_datasets, 0);
                     } else {
                         ui.label("Please initialize location configuration above to map custom frames.");
                     }
