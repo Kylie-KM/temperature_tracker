@@ -712,8 +712,28 @@ impl eframe::App for WeatherApp {
 }
 
 fn main() -> eframe::Result<()> {
-    let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 650.0]),
+    // 1. Load the file bytes at compile time
+    let icon_bytes = include_bytes!("../assets/icon.png");
+
+    // 2. Decode the PNG data into raw RGBA pixels
+    let image = image::load_from_memory(icon_bytes)
+        .expect("Failed to load embedded icon")
+        .to_rgba8();
+    
+    let (width, height) = image.dimensions();
+    let rgba_pixels = image.into_raw();
+
+    // 3. Package it into egui's IconData format
+    let icon_data = egui::IconData {
+        rgba: rgba_pixels,
+        width,
+        height,
+    };
+	
+	let native_options = eframe::NativeOptions {
+		viewport: egui::ViewportBuilder::default()
+			.with_icon(icon_data) // Sets the taskbar icon
+			.with_inner_size([900.0, 650.0]),
         ..Default::default()
     };
     
